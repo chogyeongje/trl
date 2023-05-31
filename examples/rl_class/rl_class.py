@@ -99,7 +99,7 @@ config = PPOConfig(
 # from the `datasets` library. One should customize this function to train the model on
 # its own dataset.
 def build_dataset(
-    config, dataset_name="allenai/real-toxicity-prompts", input_min_text_length=5, input_max_text_length=10
+    config, input_min_text_length=5, input_max_text_length=10, train=True
 ):
     """
     Build dataset for training. This builds the dataset from `load_dataset`, one should
@@ -116,28 +116,25 @@ def build_dataset(
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
-    ds = load_dataset(dataset_name, split="train")
-
-    def filter_fn(sample):
-        toxicity = sample["prompt"]["toxicity"]
-        return toxicity is not None and toxicity > 0.3
-
-    ds = ds.filter(filter_fn, batched=False)
+    ds = load_dataset("csv", data_files={"train": ["datasets/OASST1_train.csv", "datasets/BBQ_train.csv"], \
+                                        "test": ["datasets/OASST1_test.csv", "datasets/BBQ_test.csv"]})
 
     input_size = LengthSampler(input_min_text_length, input_max_text_length)
 
-    def tokenize(sample):
-        prompt = sample["prompt"]["text"]
-        continuation = sample["continuation"]["text"]
+    if train:
+        ds = ds["train"]
+    else:
+        ds = ds["test"]
 
-        sample["input_ids"] = tokenizer.encode(prompt + continuation)[: input_size()]
+    def tokenize(sample):
+        prompt = sample["text"]
+
+        sample["input_ids"] = tokenizer.encode(prompt)[: input_size()]
         sample["query"] = tokenizer.decode(sample["input_ids"])
         return sample
 
     ds = ds.map(tokenize, batched=False)
     ds.set_format(type="torch")
-
-    ds = ds.train_test_split(test_size=0.2, shuffle=False)["train"]
 
     return ds
 
@@ -145,7 +142,7 @@ def build_dataset(
 # We retrieve the dataloader by calling the `build_dataset` function.
 min_input_length = 30
 max_input_length = 40
-dataset = build_dataset(config, dataset_name=script_args.dataset_name, input_min_text_length=min_input_length, input_max_text_length=max_input_length)
+dataset = build_dataset(config, input_min_text_length=min_input_length, input_max_text_length=max_input_length, train=True)
 
 
 def collator(data):
@@ -255,4 +252,4 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     if epoch % 100 == 0:
         if ppo_trainer.accelerator.is_main_process:
             print(f"Epoch {epoch} done")
-    #         ppo_trainer.save_pretrained(model_save_path)
+            ppo_trainer.save_pretrained(model_save_path)

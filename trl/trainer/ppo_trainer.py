@@ -1238,8 +1238,8 @@ class PPOTrainer(BaseTrainer):
         if not os.path.exists(path):
             os.makedirs(path)
 
-        user = whoami()["name"]
-        model_card_content = MODEL_CARD_TEMPLATE.format(model_name=model_name, model_id=f"{user}/{path}")
+        # user = whoami()["name"]
+        model_card_content = MODEL_CARD_TEMPLATE.format(model_name=model_name, model_id=f"{path}")
         with open(os.path.join(path, "README.md"), "w", encoding="utf-8") as f:
             f.write(model_card_content)
 
