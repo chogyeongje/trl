@@ -69,6 +69,10 @@ class ScriptArguments:
     learning_rate: Optional[float] = field(default=(1.47e-5) * 2, metadata={"help": "the learning rate"})
     mini_batch_size: Optional[int] = field(default=4, metadata={"help": "the PPO minibatch size"})
     batch_size: Optional[int] = field(default=16, metadata={"help": "the batch size"})
+    use_usefulness: Optional[bool] = field(default=True, metadata={"help": "use usefulness as reward"})
+    use_harmfulness: Optional[bool] = field(default=True, metadata={"help": "use harmfulness as constraint"})
+    lambda_type: Optional[str] = field(default=None, metadata={"help": "type of Lambda = None, constant, model"})
+    max_constraint: Optional[float] = field(default=0.0, metadata={"help": "value of t"})
     gradient_accumulation_steps: Optional[int] = field(
         default=1, metadata={"help": "the number of gradient accumulation steps"}
     )
@@ -178,6 +182,7 @@ ppo_trainer = PPOTrainer(
     dataset=dataset,
     data_collator=collator,
     optimizer=optimizer,
+    max_constraint=script_args.max_constraint,
 )
 
 # We then build the reward pipeline, we will use the toxicity model to compute the reward.
@@ -224,25 +229,34 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
 
     # Compute sentiment score # noqa
-    texts = batch["response"]
-    usefulness_inputs = usefulness_tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(
-        ppo_trainer.accelerator.device
-    )
-    logits = usefulness_model(**usefulness_inputs).logits.float()
-    usefulness_labels = (logits[:, 0]).tolist()
-
-    rewards = [torch.tensor(output) for output in usefulness_labels]
+    rewards = []
+    if script_args.use_usefulness:
+        texts = batch["response"]
+        usefulness_inputs = usefulness_tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(
+            ppo_trainer.accelerator.device
+        )
+        logits = usefulness_model(**usefulness_inputs).logits.float()
+        usefulness_labels = (logits[:, 0]).tolist()
+    
+        rewards = [torch.tensor(output) for output in usefulness_labels]
+    else:
+        rewards = [torch.tensor([0.0]) for _ in batch["response"]]
 
     # Compute sentiment score # noqa
-    texts = batch["response"]
-    toxicity_inputs = toxicity_tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(
-        ppo_trainer.accelerator.device
-    )
-    logits = toxicity_model(**toxicity_inputs).logits.float()
-    toxicity_labels = (logits[:, 0]).tolist()
-
-    constraints = [torch.tensor(output) for output in toxicity_labels]
-    lambdas = [torch.tensor([1]) for _ in range(len(constraints))]
+    constraints, lambdas = [], []
+    if script_args.use_harmfulness:
+        texts = batch["response"]
+        toxicity_inputs = toxicity_tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(
+            ppo_trainer.accelerator.device
+        )
+        logits = toxicity_model(**toxicity_inputs).logits.float()
+        toxicity_labels = (logits[:, 0]).tolist()
+    
+        constraints = [torch.tensor(output) for output in toxicity_labels]
+        lambdas = [torch.tensor([1.]) for _ in range(len(constraints))]
+    else:
+        constraints = [torch.tensor([0.0]) for _ in batch["response"]]
+        lambdas = [torch.tensor([0.0]) for _ in batch["response"]]
 
     # Run PPO step
     stats = ppo_trainer.step(query_tensors, response_tensors, rewards, lambdas, constraints)
