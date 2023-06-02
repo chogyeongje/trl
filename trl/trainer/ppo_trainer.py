@@ -668,6 +668,7 @@ class PPOTrainer(BaseTrainer):
         t = time.time()
         all_stats = []
         early_stop = False
+        total_reward_grad = []
         for _ in range(self.config.ppo_epochs):
             if early_stop:
                 break
@@ -678,6 +679,7 @@ class PPOTrainer(BaseTrainer):
                         self.model, batch["queries"], batch["responses"], model_inputs, return_logits=True
                     )
 
+                batch["rewards"].requires_grad = True
                 train_stats = self.train_minibatch(
                     batch["logprobs"],
                     batch["values"],
@@ -687,6 +689,11 @@ class PPOTrainer(BaseTrainer):
                     vpreds,
                     batch["masks"],
                 )
+                mini_batch_reward_grad = 0
+                for reward_grad, mask in zip(batch["rewards"].grad, batch["masks"]):
+                    last_non_masked_index = mask.nonzero()[-1]
+                    mini_batch_reward_grad += reward_grad[last_non_masked_index]
+                total_reward_grad.append(mini_batch_reward_grad / self.config.mini_batch_size)
 
                 all_stats.append(train_stats)
 
@@ -695,6 +702,8 @@ class PPOTrainer(BaseTrainer):
                     early_stop = self._early_stop(policykl)
                     if early_stop:
                         break
+
+        mean_reward_grad = torch.tensor(total_reward_grad).mean()
 
         timing["time/ppo/optimize_step"] = time.time() - t
 
@@ -738,7 +747,7 @@ class PPOTrainer(BaseTrainer):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
 
-        return stats
+        return stats, mean_reward_grad
 
     def _early_stop(self, policykl):
         r"""

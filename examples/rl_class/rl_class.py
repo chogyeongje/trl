@@ -14,8 +14,10 @@
 # limitations under the License.
 from dataclasses import dataclass, field
 from typing import Optional
+from collections import defaultdict
 
 import torch
+import torch.distributed as dist
 from datasets import load_dataset
 from torch.optim import Adam
 from tqdm import tqdm
@@ -26,6 +28,7 @@ from transformers import (
     RobertaForSequenceClassification,
     RobertaTokenizer,
 )
+from accelerate import Accelerator
 
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer, create_reference_model, set_seed
 from trl.core import LengthSampler
@@ -69,9 +72,12 @@ class ScriptArguments:
     learning_rate: Optional[float] = field(default=(1.47e-5) * 2, metadata={"help": "the learning rate"})
     mini_batch_size: Optional[int] = field(default=4, metadata={"help": "the PPO minibatch size"})
     batch_size: Optional[int] = field(default=16, metadata={"help": "the batch size"})
+    ppo_epoch: Optional[int] = field(default=5, metadata={"help": "ppo epoch"})
     use_usefulness: Optional[bool] = field(default=True, metadata={"help": "use usefulness as reward"})
     use_harmfulness: Optional[bool] = field(default=True, metadata={"help": "use harmfulness as constraint"})
-    lambda_type: Optional[str] = field(default=None, metadata={"help": "type of Lambda = None, constant, model"})
+    lambda_type: Optional[str] = field(default='constant', metadata={"help": "type of Lambda = constant, linear"})
+    lambda_value: Optional[float] = field(default=-1, metadata={"help": "value of lambda if type is constraint"})
+    lambda_lr: Optional[float] = field(default=0.0, metadata={"help": "learning rate of lambda"})
     max_constraint: Optional[float] = field(default=0.0, metadata={"help": "value of t"})
     gradient_accumulation_steps: Optional[int] = field(
         default=1, metadata={"help": "the number of gradient accumulation steps"}
@@ -92,7 +98,7 @@ config = PPOConfig(
     model_name=script_args.model_name,
     learning_rate=script_args.learning_rate,
     log_with=script_args.log_with,
-    ppo_epochs=100,
+    ppo_epochs=script_args.ppo_epoch,
     mini_batch_size=script_args.mini_batch_size,
     batch_size=script_args.batch_size,
     gradient_accumulation_steps=script_args.gradient_accumulation_steps,
@@ -120,8 +126,12 @@ def build_dataset(
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
-    ds = load_dataset("csv", data_files={"train": ["datasets/OASST1_train.csv", "datasets/BBQ_train.csv"], \
-                                        "test": ["datasets/OASST1_test.csv", "datasets/BBQ_test.csv"]})
+    TRAIN_PATH = 'datasets/train'
+    TEST_PATH = 'datasets/test'
+    train_set = [os.path.join(TRAIN_PATH, d) for d in os.listdir('datasets/train') if d.endswith('.csv')]
+    test_set = [os.path.join(TEST_PATH, d) for d in os.listdir('datasets/test') if d.endswith('.csv')]
+
+    ds = load_dataset("csv", data_files={"train": train_set, "test": test_set})
 
     input_size = LengthSampler(input_min_text_length, input_max_text_length)
 
@@ -199,12 +209,15 @@ usefulness_model = RobertaForSequenceClassification.from_pretrained(usefulness_m
     ppo_trainer.accelerator.device        
 )
 
-in_features = usefulness_tokenizer.model_max_length
+accelerator = Accelerator()
+in_features = usefulness_model.roberta.embeddings.word_embeddings.embedding_dim
 print(f"Max length of usefulness tokenizer: {in_features}")
-lambda_model = get_l_models(script_args.lambda_type, script_args.max_constraint, in_features=in_features)
-lambda_model = lambda_model.to(ppo_trainer.accelerator.device)
-lambda_model.train()
-lambda_optim = torch.optim.SGD(lambda_model.parameters(), lr=0.1, momentum=0.0)
+lambda_model = get_l_models(script_args.lambda_type, in_features=in_features).to(torch.float16)
+if script_args.lambda_type == 'constant' and script_args.lambda_value >= 0:
+    lambda_model.l.data = torch.tensor(script_args.lambda_value)
+lambda_model = lambda_model.to(ppo_trainer.accelerator.device).to(torch.float16)
+lambda_optim = torch.optim.SGD(lambda_model.parameters(), lr=script_args.lambda_lr, momentum=0.0)
+lambda_model, lambda_optim, _ = accelerator.prepare(lambda_model, lambda_optim, None)
 
 # We then define the arguments to pass to the `generate` function. These arguments
 # are passed to the `generate` function of the PPOTrainer, which is a wrapper around
@@ -258,23 +271,40 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         logits = toxicity_model(**toxicity_inputs).logits.float()
         toxicity_labels = (logits[:, 0]).tolist()
     
-        toxicity_inputs = toxicity_tokenizer(texts, padding='max_length', truncation=True, return_tensors="pt").to(
-            ppo_trainer.accelerator.device
-        )
-        constraints = [lambda_model(_input, torch.tensor(_output)) for _input, _output in zip(toxicity_inputs['input_ids'], toxicity_labels)]
-        mean_constraints = torch.mean(torch.tensor(constraints))
+        lambda_grad = defaultdict(float)
+        constraints = []
+        for _input, _output in zip(toxicity_inputs['input_ids'], toxicity_labels):
+            input_embed = toxicity_model.roberta.embeddings.word_embeddings(_input)
+            constraint = lambda_model(input_embed) * (_output - script_args.max_constraint)
+            constraint.backward()
+            # Calculate dy/dw
+            for name,param in lambda_model.named_parameters():
+                lambda_grad[name] += param.grad
+            constraints.append(constraint.detach().clone())
+        for key in lambda_grad:
+            lambda_grad[key] / len(toxicity_labels)
+        mean_constraints = sum(constraints) / len(toxicity_labels)
+        # print("mean_constraint: ",  mean_constraints)
         constraints = [mean_constraints for _ in constraints]
     else:
         constraints = [torch.tensor([0.0]) for _ in batch["response"]]
 
-    # Run PPO step
-    stats = ppo_trainer.step(query_tensors, response_tensors, rewards, constraints)
-    for name, param in lambda_model.named_parameters():
-        print(name)
-        param.grad.data = -param.grad.data
-    lambda_optim.step()
-    lambda_optim.zero_grad()
+    # Run PPO step (reward_grad = -do/dy)
+    stats, reward_grad = ppo_trainer.step(query_tensors, response_tensors, rewards, constraints)
+  
+    if script_args.use_harmfulness and script_args.lambda_value >= 0:
+        lambda_optim.zero_grad()
+        # Update Lambda (w' = w + lr * do/dy * dy/dw)
+        with torch.no_grad():
+            for name, param in lambda_model.named_parameters():
+                param.grad.data = torch.clamp(reward_grad * lambda_grad[name], min=-1, max=1)
     
+        lambda_optim.step()
+    
+        if script_args.lambda_type == 'constant':
+            for name, param in lambda_model.named_parameters():
+                param.data = torch.clamp(param.data, min=0)
+
     ppo_trainer.log_stats(stats, batch, rewards)
 
     # Save model every 100 epochs
