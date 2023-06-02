@@ -134,7 +134,6 @@ class PPOTrainer(BaseTrainer):
         data_collator=None,
         num_shared_layers: Optional[int] = None,
         lr_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
-        max_constraint: Optional[float] = 0.0
     ):
         """
         Initialize PPOTrainer.
@@ -196,7 +195,6 @@ class PPOTrainer(BaseTrainer):
         self.model = model
         self.is_encoder_decoder = hasattr(self.model, "is_encoder_decoder")
         self.is_peft_model = getattr(self.model, "is_peft_model", False)
-        self.max_constraint = max_constraint
 
         if isinstance(ref_model, SUPPORTED_ARCHITECTURES):
             self.ref_model = ref_model
@@ -498,7 +496,6 @@ class PPOTrainer(BaseTrainer):
         queries: List[torch.LongTensor],
         responses: List[torch.LongTensor],
         scores: List[torch.FloatTensor],
-        lambdas: List[torch.FloatTensor],
         constraints: List[torch.FloatTensor],
     ):
         """
@@ -518,7 +515,7 @@ class PPOTrainer(BaseTrainer):
         Returns:
             `tuple`: The input processed data.
         """
-        for name, tensor_list in zip(["queries", "responses", "scores", "lambdas", "constraints"], [queries, responses, scores, lambdas, constraints]):
+        for name, tensor_list in zip(["queries", "responses", "scores", "constraints"], [queries, responses, scores, constraints]):
             if not isinstance(tensor_list, list):
                 raise ValueError(f"{name} must be a list of tensors - got {type(tensor_list)}")
             if not isinstance(tensor_list[0], torch.Tensor):
@@ -532,7 +529,6 @@ class PPOTrainer(BaseTrainer):
         queries = [tensor.to(self.current_device) for tensor in queries]
         responses = [tensor.to(self.current_device) for tensor in responses]
         scores = [tensor.to(self.current_device) for tensor in scores]
-        lambdas = [tensor.to(self.current_device) for tensor in lambdas]
         constraints = [tensor.to(self.current_device) for tensor in constraints]
 
         # squeeze scores if needed
@@ -542,13 +538,6 @@ class PPOTrainer(BaseTrainer):
             elif score.dim() == 1:
                 scores[i] = score.squeeze()
 
-        # squeeze scores if needed
-        for i, lamb in enumerate(lambdas):
-            if lamb.dim() > 1:
-                raise ValueError(f"Lambdas must be 1-dimensional - got {lamb.dim()} for {lamb}")
-            elif lamb.dim() == 1:
-                lambdas[i] = lamb.squeeze()
-
         # squeeze constraints if needed
         for i, constraint in enumerate(constraints):
             if constraint.dim() > 1:
@@ -556,7 +545,7 @@ class PPOTrainer(BaseTrainer):
             elif constraint.dim() == 1:
                 constraints[i] = constraint.squeeze()
 
-        return queries, responses, scores, lambdas, constraints
+        return queries, responses, scores, constraints
 
     @PPODecorators.empty_cuda_cache()
     def step(
@@ -564,7 +553,6 @@ class PPOTrainer(BaseTrainer):
         queries: List[torch.LongTensor],
         responses: List[torch.LongTensor],
         scores: List[torch.FloatTensor],
-        lambdas: List[torch.FloatTensor],
         constraints: List[torch.FloatTensor],
     ):
         """
@@ -583,7 +571,7 @@ class PPOTrainer(BaseTrainer):
         """
         bs = self.config.batch_size
 
-        queries, responses, scores, lambdas, constraints = self._step_safety_checker(bs, queries, responses, scores, lambdas, constraints)
+        queries, responses, scores, constraints = self._step_safety_checker(bs, queries, responses, scores, constraints)
 
         # if we want to push best model to the hub
         if hasattr(self, "highest_reward"):
@@ -645,7 +633,7 @@ class PPOTrainer(BaseTrainer):
         timing["time/ppo/forward_pass"] = time.time() - t
 
         t = time.time()
-        rewards, non_score_reward = self.compute_rewards(scores, lambdas, constraints, all_logprobs, ref_logprobs, masks)
+        rewards, non_score_reward = self.compute_rewards(scores, constraints, all_logprobs, ref_logprobs, masks)
         timing["time/ppo/compute_rewards"] = time.time() - t
 
         # upcast to float32 to avoid dataset issues
@@ -966,7 +954,6 @@ class PPOTrainer(BaseTrainer):
     def compute_rewards(
         self,
         scores: torch.FloatTensor,
-        lambdas: torch.FloatTensor,
         constraints: torch.FloatTensor,
         logprobs: torch.FloatTensor,
         ref_logprobs: torch.FloatTensor,
@@ -984,7 +971,7 @@ class PPOTrainer(BaseTrainer):
                 Log probabilities of the reference model, shape (`batch_size`, `response_length`)
         """
         rewards, non_score_rewards = [], []
-        for score, lamb, constraint, logprob, ref_logprob, mask in zip(scores, lambdas, constraints, logprobs, ref_logprobs, masks):
+        for score, constraint, logprob, ref_logprob, mask in zip(scores, constraints, logprobs, ref_logprobs, masks):
             # compute KL penalty (from difference in logprobs)
             kl = logprob - ref_logprob
             non_score_reward = -self.kl_ctl.value * kl
@@ -993,8 +980,7 @@ class PPOTrainer(BaseTrainer):
             last_non_masked_index = mask.nonzero()[-1]
 
             # reward is preference model score + KL penalty
-            # NOTE: need lambda
-            reward[last_non_masked_index] += score - lamb * (constraint - self.max_constraint)
+            reward[last_non_masked_index] += score - constraint
             rewards.append(reward)
         return torch.stack(rewards), torch.stack(non_score_rewards)
 

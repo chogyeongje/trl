@@ -29,7 +29,7 @@ from transformers import (
 
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer, create_reference_model, set_seed
 from trl.core import LengthSampler
-
+from l_models import get_l_models
 
 tqdm.pandas()
 
@@ -182,7 +182,6 @@ ppo_trainer = PPOTrainer(
     dataset=dataset,
     data_collator=collator,
     optimizer=optimizer,
-    max_constraint=script_args.max_constraint,
 )
 
 # We then build the reward pipeline, we will use the toxicity model to compute the reward.
@@ -199,6 +198,13 @@ usefulness_tokenizer = RobertaTokenizer.from_pretrained(usefulness_model_id)
 usefulness_model = RobertaForSequenceClassification.from_pretrained(usefulness_model_id, torch_dtype=torch.float16).to(
     ppo_trainer.accelerator.device        
 )
+
+in_features = usefulness_tokenizer.model_max_length
+print(f"Max length of usefulness tokenizer: {in_features}")
+lambda_model = get_l_models(script_args.lambda_type, script_args.max_constraint, in_features=in_features)
+lambda_model = lambda_model.to(ppo_trainer.accelerator.device)
+lambda_model.train()
+lambda_optim = torch.optim.SGD(lambda_model.parameters(), lr=0.1, momentum=0.0)
 
 # We then define the arguments to pass to the `generate` function. These arguments
 # are passed to the `generate` function of the PPOTrainer, which is a wrapper around
@@ -243,7 +249,7 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         rewards = [torch.tensor([0.0]) for _ in batch["response"]]
 
     # Compute sentiment score # noqa
-    constraints, lambdas = [], []
+    constraints = []
     if script_args.use_harmfulness:
         texts = batch["response"]
         toxicity_inputs = toxicity_tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(
@@ -252,14 +258,23 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         logits = toxicity_model(**toxicity_inputs).logits.float()
         toxicity_labels = (logits[:, 0]).tolist()
     
-        constraints = [torch.tensor(output) for output in toxicity_labels]
-        lambdas = [torch.tensor([1.]) for _ in range(len(constraints))]
+        toxicity_inputs = toxicity_tokenizer(texts, padding='max_length', truncation=True, return_tensors="pt").to(
+            ppo_trainer.accelerator.device
+        )
+        constraints = [lambda_model(_input, torch.tensor(_output)) for _input, _output in zip(toxicity_inputs['input_ids'], toxicity_labels)]
+        mean_constraints = torch.mean(torch.tensor(constraints))
+        constraints = [mean_constraints for _ in constraints]
     else:
         constraints = [torch.tensor([0.0]) for _ in batch["response"]]
-        lambdas = [torch.tensor([0.0]) for _ in batch["response"]]
 
     # Run PPO step
-    stats = ppo_trainer.step(query_tensors, response_tensors, rewards, lambdas, constraints)
+    stats = ppo_trainer.step(query_tensors, response_tensors, rewards, constraints)
+    for name, param in lambda_model.named_parameters():
+        print(name)
+        param.grad.data = -param.grad.data
+    lambda_optim.step()
+    lambda_optim.zero_grad()
+    
     ppo_trainer.log_stats(stats, batch, rewards)
 
     # Save model every 100 epochs
