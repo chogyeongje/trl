@@ -703,6 +703,7 @@ class PPOTrainer(BaseTrainer):
                     if early_stop:
                         break
 
+        print(total_reward_grad)
         mean_reward_grad = torch.tensor(total_reward_grad).mean()
 
         timing["time/ppo/optimize_step"] = time.time() - t

@@ -15,6 +15,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 from collections import defaultdict
+import os
 
 import torch
 import torch.distributed as dist
@@ -128,8 +129,15 @@ def build_dataset(
 
     TRAIN_PATH = 'datasets/train'
     TEST_PATH = 'datasets/test'
-    train_set = [os.path.join(TRAIN_PATH, d) for d in os.listdir('datasets/train') if d.endswith('.csv')]
-    test_set = [os.path.join(TEST_PATH, d) for d in os.listdir('datasets/test') if d.endswith('.csv')]
+    train_set = [os.path.join(TRAIN_PATH, d) for d in os.listdir(TRAIN_PATH) if d.endswith('.csv')]
+    test_set = [os.path.join(TEST_PATH, d) for d in os.listdir(TEST_PATH) if d.endswith('.csv')]
+
+    # NOTE: BBQ 먼저 처리하면 에러가 발생하네요....
+    train_set = sorted(train_set, reverse=True)
+    test_set = sorted(test_set, reverse=True)
+
+    print(train_set)
+    print(test_set)
 
     ds = load_dataset("csv", data_files={"train": train_set, "test": test_set})
 
@@ -270,19 +278,22 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         )
         logits = toxicity_model(**toxicity_inputs).logits.float()
         toxicity_labels = (logits[:, 0]).tolist()
+        print("labels", toxicity_labels)
     
         lambda_grad = defaultdict(float)
         constraints = []
         for _input, _output in zip(toxicity_inputs['input_ids'], toxicity_labels):
             input_embed = toxicity_model.roberta.embeddings.word_embeddings(_input)
-            constraint = lambda_model(input_embed) * (_output - script_args.max_constraint)
+            lambda_optim.zero_grad()
+            l = lambda_model(input_embed)
+            constraint = l * (_output - script_args.max_constraint)
             constraint.backward()
             # Calculate dy/dw
             for name,param in lambda_model.named_parameters():
                 lambda_grad[name] += param.grad
             constraints.append(constraint.detach().clone())
         for key in lambda_grad:
-            lambda_grad[key] / len(toxicity_labels)
+            lambda_grad[key] = lambda_grad[key] / len(toxicity_labels)
         mean_constraints = sum(constraints) / len(toxicity_labels)
         # print("mean_constraint: ",  mean_constraints)
         constraints = [mean_constraints for _ in constraints]
@@ -292,11 +303,12 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     # Run PPO step (reward_grad = -do/dy)
     stats, reward_grad = ppo_trainer.step(query_tensors, response_tensors, rewards, constraints)
   
-    if script_args.use_harmfulness and script_args.lambda_value >= 0:
+    if script_args.use_harmfulness and script_args.lambda_lr > 0:
         lambda_optim.zero_grad()
         # Update Lambda (w' = w + lr * do/dy * dy/dw)
         with torch.no_grad():
             for name, param in lambda_model.named_parameters():
+                print(reward_grad, lambda_grad)
                 param.grad.data = torch.clamp(reward_grad * lambda_grad[name], min=-1, max=1)
     
         lambda_optim.step()
