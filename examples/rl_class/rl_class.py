@@ -278,7 +278,7 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         )
         logits = toxicity_model(**toxicity_inputs).logits.float()
         toxicity_labels = (logits[:, 0]).tolist()
-        print("labels", toxicity_labels)
+        # print("labels", toxicity_labels)
     
         lambda_grad = defaultdict(float)
         constraints = []
