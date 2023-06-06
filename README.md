@@ -1,6 +1,10 @@
 # README
 
-{:toc}
+## Install
+
+```
+pip install -e .  # trl 설치
+```
 
 ## Add Dataset
 
