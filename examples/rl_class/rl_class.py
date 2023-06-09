@@ -24,6 +24,7 @@ from torch.optim import Adam
 from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
     AutoTokenizer,
     HfArgumentParser,
     RobertaForSequenceClassification,
@@ -110,7 +111,7 @@ config = PPOConfig(
 # from the `datasets` library. One should customize this function to train the model on
 # its own dataset.
 def build_dataset(
-    config, input_min_text_length=5, input_max_text_length=10, train=True
+    config, input_min_text_length=5, input_max_text_length=100, train=True
 ):
     """
     Build dataset for training. This builds the dataset from `load_dataset`, one should
@@ -133,8 +134,8 @@ def build_dataset(
     test_set = [os.path.join(TEST_PATH, d) for d in os.listdir(TEST_PATH) if d.endswith('.csv')]
 
     # NOTE: BBQ 먼저 처리하면 에러가 발생하네요....
-    train_set = sorted(train_set, reverse=True)
-    test_set = sorted(test_set, reverse=True)
+    train_set = sorted(train_set, key=lambda x: '0' if 'OASST' in x else x)
+    test_set = sorted(test_set, key=lambda x: '0' if 'OASST' in x else x)
 
     print(train_set)
     print(test_set)
@@ -211,14 +212,16 @@ toxicity_model = RobertaForSequenceClassification.from_pretrained(toxicity_model
     ppo_trainer.accelerator.device
 )
 
-usefulness_model_id = "allenai/dsp_roberta_base_tapt_amazon_helpfulness_115K" 
-usefulness_tokenizer = RobertaTokenizer.from_pretrained(usefulness_model_id)
-usefulness_model = RobertaForSequenceClassification.from_pretrained(usefulness_model_id, torch_dtype=torch.float16).to(
+# usefulness_model_id = "allenai/dsp_roberta_base_tapt_amazon_helpfulness_115K" 
+# usefulness_tokenizer = RobertaTokenizer.from_pretrained(usefulness_model_id)
+usefulness_model_id = "OpenAssistant/reward-model-deberta-v3-large-v2" 
+usefulness_tokenizer = AutoTokenizer.from_pretrained(usefulness_model_id)
+usefulness_model = AutoModelForSequenceClassification.from_pretrained(usefulness_model_id, torch_dtype=torch.float16).to(
     ppo_trainer.accelerator.device        
 )
 
 accelerator = Accelerator()
-in_features = usefulness_model.roberta.embeddings.word_embeddings.embedding_dim
+in_features = usefulness_model.deberta.embeddings.word_embeddings.embedding_dim
 print(f"Max length of usefulness tokenizer: {in_features}")
 lambda_model = get_l_models(script_args.lambda_type, in_features=in_features).to(torch.float16)
 if script_args.lambda_type == 'constant' and script_args.lambda_value >= 0:
@@ -259,7 +262,8 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     rewards = []
     if script_args.use_usefulness:
         texts = batch["response"]
-        usefulness_inputs = usefulness_tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(
+        answers = batch["response"]
+        usefulness_inputs = usefulness_tokenizer(texts, answers, padding=True, truncation=True, return_tensors="pt").to(
             ppo_trainer.accelerator.device
         )
         logits = usefulness_model(**usefulness_inputs).logits.float()
@@ -308,7 +312,7 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         # Update Lambda (w' = w + lr * do/dy * dy/dw)
         with torch.no_grad():
             for name, param in lambda_model.named_parameters():
-                print(reward_grad, lambda_grad)
+                # print(reward_grad, lambda_grad)
                 param.grad.data = torch.clamp(reward_grad * lambda_grad[name], min=-1, max=1)
     
         lambda_optim.step()
@@ -320,7 +324,7 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     ppo_trainer.log_stats(stats, batch, rewards)
 
     # Save model every 100 epochs
-    if epoch % 100 == 0:
+    if epoch % 1 == 0:
         if ppo_trainer.accelerator.is_main_process:
             print(f"Epoch {epoch} done")
             ppo_trainer.save_pretrained(model_save_path)

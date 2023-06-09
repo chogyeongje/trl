@@ -1,10 +1,11 @@
-CCELERATE_LOG_LEVEL=info accelerate launch rl_class.py \
-	--batch_size 8 \
-	--mini_batch_size 8 \
-	--ppo_epoch 1 \
+ACCELERATE_LOG_LEVEL=info accelerate launch \
+	rl_class.py \
+	--batch_size 32 \
+	--mini_batch_size 16 \
+	--ppo_epoch 5 \
 	--model_save_path test \
 	--use_usefulness True \
-	--use_harmfulness True \
+	--use_harmfulness False \
 	--lambda_type constant \
 	--lambda_value -1 \
 	--max_constraint 1.0 \
