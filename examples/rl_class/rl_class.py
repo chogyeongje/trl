@@ -133,7 +133,6 @@ def build_dataset(
     train_set = [os.path.join(TRAIN_PATH, d) for d in os.listdir(TRAIN_PATH) if d.endswith('.csv')]
     test_set = [os.path.join(TEST_PATH, d) for d in os.listdir(TEST_PATH) if d.endswith('.csv')]
 
-    # NOTE: BBQ 먼저 처리하면 에러가 발생하네요....
     train_set = sorted(train_set, key=lambda x: '0' if 'OASST' in x else x)
     test_set = sorted(test_set, key=lambda x: '0' if 'OASST' in x else x)
 
@@ -156,15 +155,19 @@ def build_dataset(
         sample["query"] = tokenizer.decode(sample["input_ids"])
         return sample
 
+    def filter_data(sample):
+        return input_min_text_length <= len(sample['input_ids']) <= input_max_text_length
+
     ds = ds.map(tokenize, batched=False)
+    ds = ds.filter(filter_data)
     ds.set_format(type="torch")
 
     return ds
 
 
 # We retrieve the dataloader by calling the `build_dataset` function.
-min_input_length = 30
-max_input_length = 40
+min_input_length = 5
+max_input_length = 100
 dataset = build_dataset(config, input_min_text_length=min_input_length, input_max_text_length=max_input_length, train=True)
 
 
@@ -235,6 +238,7 @@ lambda_model, lambda_optim, _ = accelerator.prepare(lambda_model, lambda_optim, 
 # the `generate` function of the trained model.
 generation_kwargs = {
     "min_length": -1,
+    "batch_size": script_args.batch_size, 
     "top_k": 0.0,
     "top_p": 1.0,
     "do_sample": True,
@@ -251,6 +255,10 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
 
     # Get response from the policy model
     response_tensors = []
+    # gen_len = output_length_sampler()
+    # generation_kwargs["max_new_tokens"] = gen_len
+    # responses = ppo_trainer.generate(query_tensors, **generation_kwargs)
+    # batch["response"] = [tokenizer.decode(r.squeeze()[-gen_len:].squeeze()) for r in responses]
     for query in query_tensors:
         gen_len = output_length_sampler()
         generation_kwargs["max_new_tokens"] = gen_len
@@ -282,7 +290,7 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         )
         logits = toxicity_model(**toxicity_inputs).logits.float()
         toxicity_labels = (logits[:, 0]).tolist()
-        # print("labels", toxicity_labels)
+        print("labels", toxicity_labels.shape)
     
         lambda_grad = defaultdict(float)
         constraints = []
