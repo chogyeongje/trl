@@ -7,7 +7,7 @@
 #SBATCH --mem=16000MB
 #SBATCH --cpus-per-task=32
 #SBATCH --output=slurm.out
-#SBATCH --partition=3090
+#SBATCH --partition=P1
 
 source ${HOME}/.bashrc
 source ${HOME}/anaconda3/etc/profile.d/conda.sh
@@ -25,3 +25,5 @@ srun accelerate launch \
 	--model_save_path test \
 	--use_usefulness True \
 	--use_harmfulness False
+
+	#--mixed_precision fp16 \

@@ -92,6 +92,11 @@ class ScriptArguments:
         default="allenai/real-toxicity-prompts"
     )
 
+@torch.no_grad():
+def param_diff(model1, model2, rtol=1e-05):
+    param1 = torch.cat([p.flatten() for p in model1.parameters()])
+    param2 = torch.cat([p.flatten() for p in model2.parameters()])
+    print("Is close?", torch.allclose(param1, param2, rtol=rtol))
 
 parser = HfArgumentParser(ScriptArguments)
 script_args = parser.parse_args_into_dataclasses()[0]
@@ -224,9 +229,9 @@ usefulness_model = AutoModelForSequenceClassification.from_pretrained(usefulness
 )
 
 accelerator = Accelerator()
-in_features = usefulness_model.deberta.embeddings.word_embeddings.embedding_dim
+in_features = toxicity_model.roberta.embeddings.word_embeddings.embedding_dim
 print(f"Max length of usefulness tokenizer: {in_features}")
-lambda_model = get_l_models(script_args.lambda_type, in_features=in_features).to(torch.float16)
+lambda_model = get_l_models(script_args.lambda_type, in_features=in_features) #.to(torch.float16)
 if script_args.lambda_type == 'constant' and script_args.lambda_value >= 0:
     lambda_model.l.data = torch.tensor(script_args.lambda_value)
 lambda_model = lambda_model.to(ppo_trainer.accelerator.device).to(torch.float16)
@@ -290,7 +295,7 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         )
         logits = toxicity_model(**toxicity_inputs).logits.float()
         toxicity_labels = (logits[:, 0]).tolist()
-        print("labels", toxicity_labels.shape)
+        # print("labels", toxicity_labels.shape)
     
         lambda_grad = defaultdict(float)
         constraints = []
@@ -336,3 +341,4 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         if ppo_trainer.accelerator.is_main_process:
             print(f"Epoch {epoch} done")
             ppo_trainer.save_pretrained(model_save_path)
+

@@ -1,4 +1,5 @@
 ACCELERATE_LOG_LEVEL=info accelerate launch \
+	--mixed_precision bf16 \
 	rl_class.py \
 	--batch_size 32 \
 	--mini_batch_size 16 \
