@@ -21,7 +21,7 @@ test_apth: trl/examples/rl_class/datasets/test
 
 ```
 cd trl/examples/rl_class
-bash train.sh				# 필요시 train.sh 수정
+sbatch sbatch_train.sh				# 필요시 sbatch_train.sh 수정
 ```
 
 
@@ -90,4 +90,12 @@ bash train.sh				# 필요시 train.sh 수정
 --lambda_lr 0.1	\			# 원하는 값으로 수정
 --max_constraint 1			# 원하는 값으로 수정
 ```
+
+## Evaluate Model
+
+```
+cd trl/examples/rl_class
+sbatch sbatch_eval.sh				# sbatch_eval.sh 의 model_name 수정
+```
+
 
