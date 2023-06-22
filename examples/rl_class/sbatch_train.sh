@@ -6,7 +6,7 @@
 #SBATCH --time=0-12:00:00
 #SBATCH --mem=16000MB
 #SBATCH --cpus-per-task=32
-#SBATCH --output=slurm.out
+#SBATCH --output=logs/EXP3.out
 #SBATCH --partition=P1
 
 source ${HOME}/.bashrc
@@ -21,9 +21,13 @@ srun accelerate launch \
 	rl_class.py \
 	--batch_size 32 \
 	--mini_batch_size 16 \
-	--ppo_epoch 5 \
-	--model_save_path test \
+	--ppo_epoch 100 \
+	--learning_rate 5e-6 \
+	--model_save_path EXP3 \
 	--use_usefulness True \
-	--use_harmfulness False
+	--use_harmfulness False \
+	--lambda_type linear \
+	--lambda_value -1 \
+	--lambda_lr 0.1 \
+	--max_constraint 1
 
-	#--mixed_precision fp16 \

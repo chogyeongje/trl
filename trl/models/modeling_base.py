@@ -395,6 +395,7 @@ def create_reference_model(
             param.requires_grad = False
         return ref_model.eval()
 
+    print("call function")
     # identify layer name pattern
     if pattern is not None:
         pattern = pattern.format(layer=num_shared_layers)
@@ -405,6 +406,7 @@ def create_reference_model(
                 pattern = pattern_candidate
                 break
 
+    print(pattern)
     if pattern is None:
         raise ValueError("Layer pattern could not be matched.")
 
@@ -421,6 +423,7 @@ def create_reference_model(
         else:
             unshared_param_list.append(name)
 
+    print(unshared_param_list)
     # create reference of the original parameter if they are shared
     for param_name in shared_param_list:
         param = model.get_parameter(param_name)

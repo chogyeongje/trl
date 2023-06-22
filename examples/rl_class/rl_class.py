@@ -92,12 +92,6 @@ class ScriptArguments:
         default="allenai/real-toxicity-prompts"
     )
 
-@torch.no_grad():
-def param_diff(model1, model2, rtol=1e-05):
-    param1 = torch.cat([p.flatten() for p in model1.parameters()])
-    param2 = torch.cat([p.flatten() for p in model2.parameters()])
-    print("Is close?", torch.allclose(param1, param2, rtol=rtol))
-
 parser = HfArgumentParser(ScriptArguments)
 script_args = parser.parse_args_into_dataclasses()[0]
 
@@ -171,10 +165,10 @@ def build_dataset(
 
 
 # We retrieve the dataloader by calling the `build_dataset` function.
-min_input_length = 5
-max_input_length = 100
+min_input_length = 20
+max_input_length = 30
 dataset = build_dataset(config, input_min_text_length=min_input_length, input_max_text_length=max_input_length, train=True)
-
+#print(len(dataset))
 
 def collator(data):
     return dict((key, [d[key] for d in data]) for key in data[0])
@@ -190,7 +184,7 @@ model = AutoModelForCausalLM.from_pretrained(config.model_name, torch_dtype=torc
 model = AutoModelForCausalLMWithValueHead.from_pretrained(model)
 
 # We create a reference model by sharing 20 layers
-ref_model = create_reference_model(model, num_shared_layers=20)
+ref_model = create_reference_model(model, num_shared_layers=23)
 
 # We make sure to use `Adam` optimizer on the model parameters that require gradients.
 optimizer = Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=config.learning_rate)
@@ -254,6 +248,7 @@ output_max_length = 30
 output_length_sampler = LengthSampler(output_min_length, output_max_length)
 
 model_save_path = script_args.model_save_path
+#print(len(ppo_trainer.dataloader))
 
 for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     query_tensors = batch["input_ids"]
@@ -274,14 +269,18 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     # Compute sentiment score # noqa
     rewards = []
     if script_args.use_usefulness:
-        texts = batch["response"]
+        texts = batch["query"]
         answers = batch["response"]
         usefulness_inputs = usefulness_tokenizer(texts, answers, padding=True, truncation=True, return_tensors="pt").to(
             ppo_trainer.accelerator.device
         )
         logits = usefulness_model(**usefulness_inputs).logits.float()
-        usefulness_labels = (logits[:, 0]).tolist()
+        neg_logits = torch.special.logit(1-torch.nn.functional.sigmoid(logits[:,0]))
+        usefulness_labels = (neg_logits).tolist()
+        #print("orig_v: ", logits[:,0].tolist())
+        #print("reward: ", usefulness_labels)
     
+        # toxicity hate = 1 / usefulness useful = 1
         rewards = [torch.tensor(output) for output in usefulness_labels]
     else:
         rewards = [torch.tensor([0.0]) for _ in batch["response"]]

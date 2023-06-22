@@ -18,6 +18,7 @@ from transformers import (
 
 from accelerate import Accelerator
 import numpy as np
+from time import sleep
 
 from trl import (
     AutoModelForCausalLMWithValueHead,
@@ -125,7 +126,7 @@ def make_batch(data, tokenizer, device):
 
 
 @torch.no_grad()
-def evaluate(dataloader, model, tokenizer, rank_model, rank_tokenizer, device, generation_kwargs):
+def evaluate(dataloader, model, tokenizer, rank_model, rank_tokenizer, const_model, const_tokenizer, device, generation_kwargs):
     warnings.filterwarnings(action='ignore')
     table = defaultdict(list)
     for batch in tqdm(dataloader):
@@ -144,13 +145,18 @@ def evaluate(dataloader, model, tokenizer, rank_model, rank_tokenizer, device, g
         question = batch['text']
         inputs = rank_tokenizer(question, answer,
                                 padding=True, truncation=True, return_tensors='pt')
-        score = rank_model(**inputs.to(device)).logits.cpu().flatten().tolist()
+        score = rank_model(**inputs.to(device)).logits[:,0].cpu().flatten().tolist()
+
+        # compute constraints
+        inputs = const_tokenizer(answer, padding=True, truncation=True, return_tensors='pt')
+        constraint = const_model(**inputs.to(device)).logits[:,0].cpu().flatten().tolist()
 
         table['data_id']  += batch['data_id']
         table['source']   += batch['source']
         table['question'] += question
         table['answer']   += answer
         table['score']    += score
+        table['constraint'] += constraint
 
     warnings.filterwarnings(action='default')
     return table
@@ -191,9 +197,14 @@ def main(args):
     rank_model = AutoModelForSequenceClassification.from_pretrained(reward_name)
     rank_tokenizer = AutoTokenizer.from_pretrained(reward_name)
      
+    # load CM
+    toxicity_model_id = "facebook/roberta-hate-speech-dynabench-r4-target"
+    const_tokenizer = AutoTokenizer.from_pretrained(toxicity_model_id)
+    const_model = AutoModelForSequenceClassification.from_pretrained(toxicity_model_id, torch_dtype=torch.float16)
+
     # load dataset
-    min_input_length = 5
-    max_input_length = 100
+    min_input_length = 20
+    max_input_length = 30
     dataset = build_dataset(
         tokenizer,
         input_min_text_length=min_input_length,
@@ -205,7 +216,7 @@ def main(args):
                 dataset,
                 batch_size=args.batch_size,
                 collate_fn=collate_fn,
-                num_workers=4,
+                num_workers=0,
                 shuffle=False,
                 drop_last=False,
             )
@@ -224,10 +235,12 @@ def main(args):
     
     model.to(device)
     rank_model.to(device)
-    results = evaluate(dataloader, model, tokenizer, rank_model, rank_tokenizer, device, generation_kwargs)
+    const_model.to(device)
+    results = evaluate(dataloader, model, tokenizer, rank_model, rank_tokenizer, const_model, const_tokenizer, device, generation_kwargs)
     
     df = pd.DataFrame(results)
-    df.to_csv('baseline.csv', index=False)
+    df.to_csv(f'{args.model_name}.csv', index=False)
+    #df.to_csv(f'baseline/baseline1.csv', index=False)
 
     print("#"*100)
     print("Min Score Example")
@@ -238,8 +251,11 @@ def main(args):
     print(df.loc[np.argmax(df.score)])
 
 
-    baseline = pd.read_csv("baseline.csv")
-    print("Improvement rate:", (df.score > baseline.score).sum() / len(df))
+    for i in range(5):
+        baseline = pd.read_csv(f"baseline/baseline{i}.csv")
+
+        print("Improvement rate:", (df.score > baseline.score).sum() / len(df))
+        print("Improvement Constraint rate:", (df.constraint > baseline.constraint).sum() / len(df))
 
 if __name__ == '__main__':
     args = parsing_arguments()
